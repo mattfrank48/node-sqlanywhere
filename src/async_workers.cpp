@@ -198,27 +198,27 @@ ExecStmtWorker::ExecStmtWorker(StmtObject* s, const Napi::Function& cb, Napi::Ar
     prepareBindParams(p, bind_params, param_data);
 }
 void ExecStmtWorker::Execute() {
-    WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Entry for stmt %p", (void*)stmt_obj);    
-    
-    if (stmt_obj == nullptr || stmt_obj->connection == nullptr || stmt_obj->sqlany_stmt == nullptr) {
+    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "ExecStmtWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
+
+    // Check for null stmt_obj *before* trying to access its members
+    if (stmt_obj == nullptr) {
         error_msg = "Statement is not valid (it may have been dropped).";
-        WORKER_LOG(stmt_obj ? stmt_obj->connection : nullptr, "ExecStmtWorker: Execute: ERROR - %s", error_msg.c_str());
+        WORKER_LOG(NULL, "ExecStmtWorker: Execute: ERROR - %s", error_msg.c_str());
         return; // Abort execution
     }
 
     uv_mutex_lock(&stmt_obj->connection->conn_mutex);
-    WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Mutex locked. conn: %p", stmt_obj->connection->conn);
-    
-    if (!stmt_obj->connection->conn) {
-        WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR - Not connected.");
-        error_msg = "Not connected.";
-    } else if (!stmt_obj->sqlany_stmt) {
-        WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR - Statement handle is NULL.");
-        error_msg = "Statement handle is invalid.";
-    } else {
-        WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Binding %zu params.", bind_params.size());
-        for (size_t i = 0; i < bind_params.size(); i++) {
-            if (!api.sqlany_bind_param(stmt_obj->sqlany_stmt, i, &bind_params[i])) {
+    WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Mutex locked. conn: %p", stmt_obj->connection);
+
+    if (stmt_obj->connection == nullptr || stmt_obj->sqlany_stmt == nullptr) {
+        error_msg = "Statement is not valid (it may have been dropped).";
+        WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR - %s", error_msg.c_str());
+        uv_mutex_unlock(&stmt_obj->connection->conn_mutex);
+        return; // Abort execution
+    }
+
+    for (size_t i = 0; i < bind_params.size(); i++) {
+        if (!api.sqlany_bind_param(stmt_obj->sqlany_stmt, i, &bind_params[i])) {
                 getErrorMsg(stmt_obj->connection->conn, error_msg);
                 WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR binding param %zu: %s", i, error_msg.c_str());
                 break;
@@ -412,27 +412,26 @@ GetMoreResultsWorker::GetMoreResultsWorker(StmtObject* s, const Napi::Function& 
     WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: CREATED for stmt %p", (void*)stmt_obj);
 }
 void GetMoreResultsWorker::Execute() {
-    WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
+    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "GetMoreResultsWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
 
-    if (stmt_obj == nullptr || stmt_obj->connection == nullptr || stmt_obj->sqlany_stmt == nullptr) {
+    // Check for null stmt_obj *before* trying to access its members
+    if (stmt_obj == nullptr) {
         error_msg = "Statement is not valid (it may have been dropped).";
-        WORKER_LOG(stmt_obj ? stmt_obj->connection : nullptr, "GetMoreResultsWorker: Execute: ERROR - %s", error_msg.c_str());
+        WORKER_LOG(NULL, "GetMoreResultsWorker: Execute: ERROR - %s", error_msg.c_str());
         return; // Abort execution
     }
     
     uv_mutex_lock(&stmt_obj->connection->conn_mutex);
     WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Mutex locked.");
 
-    if (!stmt_obj || !stmt_obj->sqlany_stmt) {
-        error_msg = "Statement is not valid.";
-        WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: ERROR - Statement is not valid.");
+    if (stmt_obj->connection == nullptr || stmt_obj->sqlany_stmt == nullptr) {
+        error_msg = "Statement is not valid (it may have been dropped).";
+        WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: ERROR - %s", error_msg.c_str());
         uv_mutex_unlock(&stmt_obj->connection->conn_mutex);
         return;
     }
     
-    WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Calling sqlany_get_next_result.");
-    has_more_results = api.sqlany_get_next_result(stmt_obj->sqlany_stmt);
-    
+    has_more_results = api.sqlany_get_next_result(stmt_obj->sqlany_stmt);    
     if (!has_more_results) {
         char buffer[SACAPI_ERROR_SIZE];
         int rc = api.sqlany_error(stmt_obj->connection->conn, buffer, sizeof(buffer));

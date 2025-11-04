@@ -17,7 +17,7 @@ extern bool g_debug_logging;
 #define WORKER_LOG(conn_obj, format, ...) \
     do { \
         if (g_debug_logging) { \
-            fprintf(stderr, "[DEBUG %p] (%s:%d) " format "\n", (conn_obj) ? (void*)conn_obj : (void*)"(nil)", __FILE__, __LINE__, ##__VA_ARGS__); \
+            fprintf(stderr, "[DEBUG %p] (%s:%d) " format "\n", (conn_obj) ? (void*)conn_obj : NULL, __FILE__, __LINE__, ##__VA_ARGS__); \
             fflush(stderr); \
         } \
     } while (0)
