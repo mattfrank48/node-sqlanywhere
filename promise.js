@@ -41,4 +41,5 @@ function createPromisedConnection() {
 
 module.exports = {
     createConnection: createPromisedConnection,
+    debugLogging: sqlanywhere.debugLogging,
 };

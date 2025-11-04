@@ -8,6 +8,9 @@
 #include "stmt.h"
 #include <vector>
 #include <string>
+#include <stdio.h>
+#include "debug.h"
+
 
 class Connection : public Napi::ObjectWrap<Connection> {
 public:

@@ -17,7 +17,7 @@ This driver is built using N-API, ensuring a stable and future-proof interface t
 ## Prerequisites
 
 * **Node.js**: Version 18.0.0 or higher.
-* **SAP SQL Anywhere**: The appropriate SQL Anywhere client libraries must be installed and correctly configured in your environment (e.g., via the `$SQLANY` environment variable and system path). - These can be downloaded from [here](https://help.sap.com/docs/SUPPORT_CONTENT/sqlany/3362971128.html?locale=en-US)
+* **SAP SQL Anywhere**: The appropriate SQL Anywhere client libraries must be installed and correctly configured in your environment (e.g., via the `$SQLANY` environment variable and system path). - These can be downloaded from [SAP Support](https://help.sap.com/docs/SUPPORT_CONTENT/sqlany/3362971128.html?locale=en-US)
 * If compiling;
   * **C++ Toolchain**: A C++ compiler and build tools are required for the native addon compilation. This is typically handled by `node-gyp`. Please see the [`node-gyp` installation guide](https://github.com/nodejs/node-gyp#installation) for platform-specific instructions.
 
@@ -34,8 +34,8 @@ The installation process will attempt to use pre-built binaries, if that fails, 
 > [!TIP]
 > This package provides two entry points:
 >
-> - `@iqx-limited/sqlanywhere`: Exposes the original callback-based API.
-> - `@iqx-limited/sqlanywhere/promise`: Exposes a fully promisified API, ideal for use with `async/await`.
+> * `@iqx-limited/sqlanywhere`: Exposes the original callback-based API.
+> * `@iqx-limited/sqlanywhere/promise`: Exposes a fully promisified API, ideal for use with `async/await`.
 >
 > All examples below use the `/promise` entry point for modern, promise-based usage. If you prefer callbacks, use the main package import instead.
 
@@ -126,6 +126,21 @@ This driver provides comprehensive support for a wide range of SQL Anywhere data
 | `INTEGER`, `BIGINT`, `SMALLINT`, `TINYINT`, `DECIMAL`, `DOUBLE`, `FLOAT`, `BIT`, etc.       | `number`                                      |
 | `VARCHAR`, `CHAR`, `LONG NVARCHAR`, `DATE`, `TIME`, `TIMESTAMP`, `UNIQUEIDENTIFIER`, `XML` | `string`                                      |
 | `BINARY`, `VARBINARY`, `LONG BINARY`, `ST_GEOMETRY`                                        | `Buffer`                                      |
+
+## Debug Logging
+
+```ts
+// Import from the main package:
+import { debugLogging } from '@iqx-limited/sqlanywhere';
+// or: const { debugLogging } = require('@iqx-limited/sqlanywhere');
+
+// Or import from the /promise entry point:
+import { debugLogging } from '@iqx-limited/sqlanywhere/promise';
+// or: const { debugLogging } = require('@iqx-limited/sqlanywhere/promise');
+
+// Then set to true
+debugLogging(true);
+```
 
 ## Running the Test Suite
 
