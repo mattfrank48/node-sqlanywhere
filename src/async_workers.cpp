@@ -6,8 +6,6 @@
 void prepareBindParams(Napi::Array params, std::vector<a_sqlany_bind_param>& bind_params, ExecuteData& param_data);
 
 Napi::Value buildResult(Napi::Env env, a_sqlany_stmt* stmt) {
-    // This function is on the main thread (in OnOK), so logging is less critical for race conditions
-    // but useful for debugging result set issues.
     int num_cols = api.sqlany_num_cols(stmt);
     if (num_cols <= 0) {
         return Napi::Number::New(env, api.sqlany_affected_rows(stmt));
@@ -194,7 +192,7 @@ void ExecWorker::OnOK() {
 
 ExecStmtWorker::ExecStmtWorker(StmtObject* s, const Napi::Function& cb, Napi::Array p)
     : Napi::AsyncWorker(cb), stmt_obj(s), result(Env().Undefined()), error_msg("") {
-    WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: CREATED for stmt %p", (void*)stmt_obj);
+    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "ExecStmtWorker: CREATED for stmt %p", (void*)stmt_obj);
     prepareBindParams(p, bind_params, param_data);
 }
 void ExecStmtWorker::Execute() {
@@ -210,6 +208,7 @@ void ExecStmtWorker::Execute() {
     uv_mutex_lock(&stmt_obj->connection->conn_mutex);
     WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Mutex locked. conn: %p", stmt_obj->connection);
 
+    // SAFE CHECK: *Inside* the lock, check that connection and stmt handle are valid
     if (stmt_obj->connection == nullptr || stmt_obj->sqlany_stmt == nullptr) {
         error_msg = "Statement is not valid (it may have been dropped).";
         WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR - %s", error_msg.c_str());
@@ -219,24 +218,20 @@ void ExecStmtWorker::Execute() {
 
     for (size_t i = 0; i < bind_params.size(); i++) {
         if (!api.sqlany_bind_param(stmt_obj->sqlany_stmt, i, &bind_params[i])) {
-                getErrorMsg(stmt_obj->connection->conn, error_msg);
-                WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR binding param %zu: %s", i, error_msg.c_str());
-                break;
-            }
+            getErrorMsg(stmt_obj->connection->conn, error_msg);
+            WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR binding param %zu: %s", i, error_msg.c_str());
+            break;
         }
-        if(error_msg.empty()) {
-            WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Calling sqlany_execute.");
-            if(!api.sqlany_execute(stmt_obj->sqlany_stmt)) {
-                getErrorMsg(stmt_obj->connection->conn, error_msg);
-                WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR executing: %s", error_msg.c_str());
-            }
-        }
+    }
+    if(error_msg.empty() && !api.sqlany_execute(stmt_obj->sqlany_stmt)) {
+        getErrorMsg(stmt_obj->connection->conn, error_msg);
+        WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR executing: %s", error_msg.c_str());
     }
     uv_mutex_unlock(&stmt_obj->connection->conn_mutex);
     WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Mutex unlocked. Exiting.");
 }
 void ExecStmtWorker::OnOK() {
-    WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: OnOK: Entry. error: '%s'", error_msg.c_str());
+    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "ExecStmtWorker: OnOK: Entry. error: '%s'", error_msg.c_str());
     Napi::HandleScope scope(Env());
     if (error_msg.empty()) {
         result = buildResult(Env(), stmt_obj->sqlany_stmt);
@@ -244,7 +239,7 @@ void ExecStmtWorker::OnOK() {
     } else {
         Callback().Call({Napi::Error::New(Env(), error_msg).Value()});
     }
-    WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: OnOK: Exiting.");
+    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "ExecStmtWorker: OnOK: Exiting.");
 }
 
 
@@ -381,7 +376,7 @@ void PrepareWorker::OnOK() {
         unwrapped->sqlany_stmt = stmt_handle;
         
         WORKER_LOG(conn_obj, "PrepareWorker: OnOK: Creating new StmtObject %p and setting its connection.", (void*)unwrapped);
-        unwrapped->setConnection(conn_obj); // This adds the statement to conn_obj->statements
+        unwrapped->setConnection(conn_obj);
         
         Callback().Call({Env().Null(), stmt_obj});
     } else {
@@ -392,28 +387,33 @@ void PrepareWorker::OnOK() {
 
 DropStmtWorker::DropStmtWorker(StmtObject* s, const Napi::Function& cb)
     : Napi::AsyncWorker(cb), stmt_obj(s) {
-    WORKER_LOG(stmt_obj->connection, "DropStmtWorker: CREATED for stmt %p", (void*)stmt_obj);
+    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "DropStmtWorker: CREATED for stmt %p", (void*)stmt_obj);
 }
 void DropStmtWorker::Execute() {
-    WORKER_LOG(stmt_obj->connection, "DropStmtWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
-    // Note: stmt_obj->cleanup() is assumed to handle its own thread safety
-    // if it interacts with the connection.
-    // Based on Connection::cleanupStmts, it seems stmt->cleanup() just frees the statement.
-    stmt_obj->cleanup();
-    WORKER_LOG(stmt_obj->connection, "DropStmtWorker: Execute: Exiting for stmt %p", (void*)stmt_obj);
+    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "DropStmtWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
+    
+    if (stmt_obj == nullptr) {
+         WORKER_LOG(NULL, "DropStmtWorker: Execute: StmtObject is already null.");
+         return;
+    }
+    
+    // cleanup() is safe to call even if connection is null
+    stmt_obj->cleanup(); 
+    
+    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "DropStmtWorker: Execute: Exiting for stmt %p", (void*)stmt_obj);
 }
 void DropStmtWorker::OnOK() {
-    WORKER_LOG(stmt_obj->connection, "DropStmtWorker: OnOK: Entry for stmt %p", (void*)stmt_obj);
+    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "DropStmtWorker: OnOK: Entry for stmt %p", (void*)stmt_obj);
     Callback().Call({Env().Null()});
 }
 
 GetMoreResultsWorker::GetMoreResultsWorker(StmtObject* s, const Napi::Function& cb)
     : Napi::AsyncWorker(cb), stmt_obj(s), result(Env().Undefined()), error_msg(""), has_more_results(false) {
-    WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: CREATED for stmt %p", (void*)stmt_obj);
+    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "GetMoreResultsWorker: CREATED for stmt %p", (void*)stmt_obj);
 }
 void GetMoreResultsWorker::Execute() {
     WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "GetMoreResultsWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
-
+    
     // Check for null stmt_obj *before* trying to access its members
     if (stmt_obj == nullptr) {
         error_msg = "Statement is not valid (it may have been dropped).";
@@ -424,6 +424,7 @@ void GetMoreResultsWorker::Execute() {
     uv_mutex_lock(&stmt_obj->connection->conn_mutex);
     WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Mutex locked.");
 
+    // SAFE CHECK: *Inside* the lock, check that connection and stmt handle are valid
     if (stmt_obj->connection == nullptr || stmt_obj->sqlany_stmt == nullptr) {
         error_msg = "Statement is not valid (it may have been dropped).";
         WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: ERROR - %s", error_msg.c_str());
@@ -431,7 +432,9 @@ void GetMoreResultsWorker::Execute() {
         return;
     }
     
-    has_more_results = api.sqlany_get_next_result(stmt_obj->sqlany_stmt);    
+    WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Calling sqlany_get_next_result.");
+    has_more_results = api.sqlany_get_next_result(stmt_obj->sqlany_stmt);
+    
     if (!has_more_results) {
         char buffer[SACAPI_ERROR_SIZE];
         int rc = api.sqlany_error(stmt_obj->connection->conn, buffer, sizeof(buffer));
@@ -448,7 +451,7 @@ void GetMoreResultsWorker::Execute() {
     WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Mutex unlocked. Exiting.");
 }
 void GetMoreResultsWorker::OnOK() {
-    WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: OnOK: Entry. has_more: %s, error: '%s'", has_more_results ? "true" : "false", error_msg.c_str());
+    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "GetMoreResultsWorker: OnOK: Entry. has_more: %s, error: '%s'", has_more_results ? "true" : "false", error_msg.c_str());
     Napi::HandleScope scope(Env());
     if (!error_msg.empty()) {
         Callback().Call({Napi::Error::New(Env(), error_msg).Value()});
@@ -458,5 +461,5 @@ void GetMoreResultsWorker::OnOK() {
     } else {
         Callback().Call({Env().Null(), Env().Undefined()});
     }
-    WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: OnOK: Exiting.");
+    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "GetMoreResultsWorker: OnOK: Exiting.");
 }
