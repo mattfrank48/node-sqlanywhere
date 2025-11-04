@@ -88,3 +88,9 @@ export class Connection {
  * @returns A new Connection instance.
  */
 export class createConnection extends Connection {}
+
+/**
+ * Enables or disables native debug logging.
+ * @param enable Set to `true` to enable logging, `false` to disable.
+ */
+export function debugLogging(enable: boolean): void;

@@ -5,6 +5,7 @@
 #include <uv.h>
 #include "napi.h"
 #include "sqlany_utils.h"
+#include "debug.h"
 
 // Forward declare Connection to avoid circular dependency
 class Connection;
@@ -19,6 +20,7 @@ public:
 
     // Public methods
     void cleanup();
+    void cleanupForConnection();
     void setConnection(Connection *conn_obj);
 
     // Public properties
