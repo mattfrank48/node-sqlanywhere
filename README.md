@@ -130,8 +130,8 @@ This driver provides comprehensive support for a wide range of SQL Anywhere data
 ## Debug Logging
 
 ```ts
-import { debugLogging } from 'node-sqlanywhere';
-// or: const { debugLogging } = require('node-sqlanywhere');
+import { debugLogging } from '@iqx-limited/sqlanywhere';
+// or: const { debugLogging } = require('@iqx-limited/sqlanywhere');
 
 // Turn on the C++ stderr logging
 debugLogging(true);
