@@ -198,7 +198,14 @@ ExecStmtWorker::ExecStmtWorker(StmtObject* s, const Napi::Function& cb, Napi::Ar
     prepareBindParams(p, bind_params, param_data);
 }
 void ExecStmtWorker::Execute() {
-    WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
+    WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Entry for stmt %p", (void*)stmt_obj);    
+    
+    if (stmt_obj == nullptr || stmt_obj->connection == nullptr || stmt_obj->sqlany_stmt == nullptr) {
+        error_msg = "Statement is not valid (it may have been dropped).";
+        WORKER_LOG(stmt_obj ? stmt_obj->connection : nullptr, "ExecStmtWorker: Execute: ERROR - %s", error_msg.c_str());
+        return; // Abort execution
+    }
+
     uv_mutex_lock(&stmt_obj->connection->conn_mutex);
     WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Mutex locked. conn: %p", stmt_obj->connection->conn);
     
@@ -406,6 +413,13 @@ GetMoreResultsWorker::GetMoreResultsWorker(StmtObject* s, const Napi::Function& 
 }
 void GetMoreResultsWorker::Execute() {
     WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
+
+    if (stmt_obj == nullptr || stmt_obj->connection == nullptr || stmt_obj->sqlany_stmt == nullptr) {
+        error_msg = "Statement is not valid (it may have been dropped).";
+        WORKER_LOG(stmt_obj ? stmt_obj->connection : nullptr, "GetMoreResultsWorker: Execute: ERROR - %s", error_msg.c_str());
+        return; // Abort execution
+    }
+    
     uv_mutex_lock(&stmt_obj->connection->conn_mutex);
     WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Mutex locked.");
 

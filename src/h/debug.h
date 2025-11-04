@@ -4,7 +4,7 @@
 // Make the global flag available to all files that include this header
 extern bool g_debug_logging;
 
-// Using (void*)this as a unique ID for the Connection object
+// Use (void*)this or (void*)conn_obj as a unique ID for the logged object
 #define DEBUG_LOG(format, ...) \
     do { \
         if (g_debug_logging) { \
@@ -17,7 +17,7 @@ extern bool g_debug_logging;
 #define WORKER_LOG(conn_obj, format, ...) \
     do { \
         if (g_debug_logging) { \
-            fprintf(stderr, "[DEBUG %p] (%s:%d) " format "\n", (void*)conn_obj, __FILE__, __LINE__, ##__VA_ARGS__); \
+            fprintf(stderr, "[DEBUG %p] (%s:%d) " format "\n", (conn_obj) ? (void*)conn_obj : (void*)"(nil)", __FILE__, __LINE__, ##__VA_ARGS__); \
             fflush(stderr); \
         } \
     } while (0)
