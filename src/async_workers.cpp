@@ -2,8 +2,100 @@
 #include <cmath>
 #include "h/debug.h"
 
-// Forward declaration to be used in prepareBindParams
+// Forward declaration
 void prepareBindParams(Napi::Array params, std::vector<a_sqlany_bind_param>& bind_params, ExecuteData& param_data);
+
+// --- RUNS ON BACKGROUND C++ THREAD ---
+// Syncs across the network and caches the data locally
+void fetchResultSet(a_sqlany_stmt* stmt, FetchResult& out_result) {
+    out_result.num_cols = api.sqlany_num_cols(stmt);
+    if (out_result.num_cols <= 0) {
+        out_result.affected_rows = api.sqlany_affected_rows(stmt);
+        return;
+    }
+
+    // Pre-fetch column names to avoid fetching them inside the loop
+    std::vector<a_sqlany_column_info> col_infos(out_result.num_cols);
+    for (int i = 0; i < out_result.num_cols; i++) {
+        api.sqlany_get_column_info(stmt, i, &col_infos[i]);
+    }
+
+    while (api.sqlany_fetch_next(stmt)) {
+        std::vector<FetchColumn> row(out_result.num_cols);
+        for (int i = 0; i < out_result.num_cols; i++) {
+            a_sqlany_data_value val;
+            api.sqlany_get_column(stmt, i, &val);
+
+            row[i].name = col_infos[i].name;
+            row[i].is_null = *(val.is_null);
+            row[i].type = val.type;
+
+            if (!row[i].is_null) {
+                switch(val.type) {
+                    case A_BINARY:
+                    case A_STRING:
+                         row[i].string_val = std::string(val.buffer, *(val.length));
+                         break;
+                    case A_DOUBLE: row[i].double_val = *(double*)val.buffer; break;
+                    case A_FLOAT: row[i].float_val = *(float*)val.buffer; break;
+                    case A_VAL64: row[i].val64 = *(long long*)val.buffer; break;
+                    case A_UVAL64: row[i].uval64 = *(unsigned long long*)val.buffer; break;
+                    case A_VAL32: row[i].val32 = *(int*)val.buffer; break;
+                    case A_UVAL32: row[i].uval32 = *(unsigned int*)val.buffer; break;
+                    case A_VAL16: row[i].val16 = *(short*)val.buffer; break;
+                    case A_UVAL16: row[i].uval16 = *(unsigned short*)val.buffer; break;
+                    case A_VAL8: row[i].val8 = *(signed char*)val.buffer; break;
+                    case A_UVAL8: row[i].uval8 = *(unsigned char*)val.buffer; break;
+                    default: row[i].string_val = "Unsupported Type"; break;
+                }
+            }
+        }
+        out_result.rows.push_back(std::move(row));
+    }
+}
+
+// --- RUNS ON NODE.JS MAIN THREAD ---
+// Instantly maps local C++ memory to V8 JavaScript objects
+Napi::Value buildJSResult(Napi::Env env, const FetchResult& fetch_result) {
+    if (fetch_result.num_cols <= 0) {
+        return Napi::Number::New(env, fetch_result.affected_rows);
+    }
+
+    Napi::Array results = Napi::Array::New(env);
+    for (uint32_t r = 0; r < fetch_result.rows.size(); r++) {
+        Napi::Object row = Napi::Object::New(env);
+        const auto& f_row = fetch_result.rows[r];
+
+        for (uint32_t c = 0; c < f_row.size(); c++) {
+            const FetchColumn& col = f_row[c];
+            if (col.is_null) {
+                row.Set(col.name, env.Null());
+            } else {
+                switch(col.type) {
+                    case A_BINARY:
+                        row.Set(col.name, Napi::Buffer<char>::Copy(env, col.string_val.data(), col.string_val.size()));
+                        break;
+                    case A_STRING:
+                        row.Set(col.name, Napi::String::New(env, col.string_val.data(), col.string_val.size()));
+                        break;
+                    case A_DOUBLE: row.Set(col.name, Napi::Number::New(env, col.double_val)); break;
+                    case A_FLOAT: row.Set(col.name, Napi::Number::New(env, col.float_val)); break;
+                    case A_VAL64: row.Set(col.name, Napi::Number::New(env, (double)col.val64)); break;
+                    case A_UVAL64: row.Set(col.name, Napi::Number::New(env, (double)col.uval64)); break;
+                    case A_VAL32: row.Set(col.name, Napi::Number::New(env, col.val32)); break;
+                    case A_UVAL32: row.Set(col.name, Napi::Number::New(env, col.uval32)); break;
+                    case A_VAL16: row.Set(col.name, Napi::Number::New(env, col.val16)); break;
+                    case A_UVAL16: row.Set(col.name, Napi::Number::New(env, col.uval16)); break;
+                    case A_VAL8: row.Set(col.name, Napi::Number::New(env, col.val8)); break;
+                    case A_UVAL8: row.Set(col.name, Napi::Number::New(env, col.uval8)); break;
+                    default: row.Set(col.name, Napi::String::New(env, col.string_val)); break;
+                }
+            }
+        }
+        results[r] = row;
+    }
+    return results;
+}
 
 Napi::Value buildResult(Napi::Env env, a_sqlany_stmt* stmt) {
     int num_cols = api.sqlany_num_cols(stmt);
@@ -137,6 +229,7 @@ void ExecWorker::Execute() {
     WORKER_LOG(conn_obj, "ExecWorker: Execute: Entry");
     uv_mutex_lock(&conn_obj->conn_mutex);
     WORKER_LOG(conn_obj, "ExecWorker: Execute: Mutex locked. conn: %p", conn_obj->conn);
+
     if (!conn_obj->conn) {
         WORKER_LOG(conn_obj, "ExecWorker: Execute: ERROR - Not connected.");
         error_msg = "Not connected.";
@@ -144,6 +237,9 @@ void ExecWorker::Execute() {
         if (bind_params.empty()) {
             WORKER_LOG(conn_obj, "ExecWorker: Execute: Calling sqlany_execute_direct.");
             stmt_handle = api.sqlany_execute_direct(conn_obj->conn, sql.c_str());
+            if (stmt_handle) {
+                fetchResultSet(stmt_handle, fetch_result); // <--- FETCH BACKGROUND
+            }
         } else {
             WORKER_LOG(conn_obj, "ExecWorker: Execute: Calling sqlany_prepare.");
             stmt_handle = api.sqlany_prepare(conn_obj->conn, sql.c_str());
@@ -161,6 +257,8 @@ void ExecWorker::Execute() {
                     if (!api.sqlany_execute(stmt_handle)) {
                         getErrorMsg(conn_obj->conn, error_msg);
                         WORKER_LOG(conn_obj, "ExecWorker: Execute: ERROR executing prepared statement: %s", error_msg.c_str());
+                    } else {
+                        fetchResultSet(stmt_handle, fetch_result); // <--- FETCH BACKGROUND
                     }
                 }
             }
@@ -169,23 +267,29 @@ void ExecWorker::Execute() {
             getErrorMsg(conn_obj->conn, error_msg);
             WORKER_LOG(conn_obj, "ExecWorker: Execute: ERROR getting statement handle: %s", error_msg.c_str());
         }
+
+        // Clean up the statement safely in the background
+        if (stmt_handle) {
+            WORKER_LOG(conn_obj, "ExecWorker: Execute: Freeing statement handle %p", (void*)stmt_handle);
+            api.sqlany_free_stmt(stmt_handle);
+            stmt_handle = nullptr; 
+        }
     }
     uv_mutex_unlock(&conn_obj->conn_mutex);
     WORKER_LOG(conn_obj, "ExecWorker: Execute: Mutex unlocked. Exiting.");
 }
+
 void ExecWorker::OnOK() {
     WORKER_LOG(conn_obj, "ExecWorker: OnOK: Entry. error: '%s'", error_msg.c_str());
     Napi::HandleScope scope(Env());
-    if (stmt_handle) {
-        if(error_msg.empty()) {
-            WORKER_LOG(conn_obj, "ExecWorker: OnOK: Building result.");
-            result = buildResult(Env(), stmt_handle);
-        }
-        WORKER_LOG(conn_obj, "ExecWorker: OnOK: Freeing statement handle %p", (void*)stmt_handle);
-        api.sqlany_free_stmt(stmt_handle);
+
+    if (!error_msg.empty()) {
+        Callback().Call({Napi::Error::New(Env(), error_msg).Value()});
+    } else {
+        WORKER_LOG(conn_obj, "ExecWorker: OnOK: Building result.");
+        result = buildJSResult(Env(), fetch_result); // <--- BUILD JAVASCRIPT OBJECTS
+        Callback().Call({Env().Null(), result});
     }
-    if (!error_msg.empty()) { Callback().Call({Napi::Error::New(Env(), error_msg).Value()}); }
-    else { Callback().Call({Env().Null(), result}); }
     WORKER_LOG(conn_obj, "ExecWorker: OnOK: Exiting.");
 }
 
@@ -197,25 +301,21 @@ ExecStmtWorker::ExecStmtWorker(StmtObject* s, const Napi::Function& cb, Napi::Ar
 }
 void ExecStmtWorker::Execute() {
     WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "ExecStmtWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
-
-    // Check for null stmt_obj *before* trying to access its members
+    
     if (stmt_obj == nullptr) {
         error_msg = "Statement is not valid (it may have been dropped).";
         WORKER_LOG(NULL, "ExecStmtWorker: Execute: ERROR - %s", error_msg.c_str());
-        return; // Abort execution
+        return; 
     }
-
     uv_mutex_lock(&stmt_obj->connection->conn_mutex);
     WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Mutex locked. conn: %p", stmt_obj->connection);
-
-    // SAFE CHECK: *Inside* the lock, check that connection and stmt handle are valid
+    
     if (stmt_obj->connection == nullptr || stmt_obj->sqlany_stmt == nullptr) {
         error_msg = "Statement is not valid (it may have been dropped).";
         WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR - %s", error_msg.c_str());
         uv_mutex_unlock(&stmt_obj->connection->conn_mutex);
-        return; // Abort execution
+        return; 
     }
-
     for (size_t i = 0; i < bind_params.size(); i++) {
         if (!api.sqlany_bind_param(stmt_obj->sqlany_stmt, i, &bind_params[i])) {
             getErrorMsg(stmt_obj->connection->conn, error_msg);
@@ -226,15 +326,18 @@ void ExecStmtWorker::Execute() {
     if(error_msg.empty() && !api.sqlany_execute(stmt_obj->sqlany_stmt)) {
         getErrorMsg(stmt_obj->connection->conn, error_msg);
         WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR executing: %s", error_msg.c_str());
+    } else if (error_msg.empty()) {
+        fetchResultSet(stmt_obj->sqlany_stmt, fetch_result); // <--- FETCH BACKGROUND
     }
     uv_mutex_unlock(&stmt_obj->connection->conn_mutex);
     WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Mutex unlocked. Exiting.");
 }
+
 void ExecStmtWorker::OnOK() {
     WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "ExecStmtWorker: OnOK: Entry. error: '%s'", error_msg.c_str());
     Napi::HandleScope scope(Env());
     if (error_msg.empty()) {
-        result = buildResult(Env(), stmt_obj->sqlany_stmt);
+        result = buildJSResult(Env(), fetch_result); // <--- BUILD JAVASCRIPT OBJECTS
         Callback().Call({Env().Null(), result});
     } else {
         Callback().Call({Napi::Error::New(Env(), error_msg).Value()});
@@ -413,18 +516,13 @@ GetMoreResultsWorker::GetMoreResultsWorker(StmtObject* s, const Napi::Function& 
 }
 void GetMoreResultsWorker::Execute() {
     WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "GetMoreResultsWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
-    
-    // Check for null stmt_obj *before* trying to access its members
     if (stmt_obj == nullptr) {
         error_msg = "Statement is not valid (it may have been dropped).";
         WORKER_LOG(NULL, "GetMoreResultsWorker: Execute: ERROR - %s", error_msg.c_str());
-        return; // Abort execution
+        return; 
     }
-    
     uv_mutex_lock(&stmt_obj->connection->conn_mutex);
     WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Mutex locked.");
-
-    // SAFE CHECK: *Inside* the lock, check that connection and stmt handle are valid
     if (stmt_obj->connection == nullptr || stmt_obj->sqlany_stmt == nullptr) {
         error_msg = "Statement is not valid (it may have been dropped).";
         WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: ERROR - %s", error_msg.c_str());
@@ -438,7 +536,7 @@ void GetMoreResultsWorker::Execute() {
     if (!has_more_results) {
         char buffer[SACAPI_ERROR_SIZE];
         int rc = api.sqlany_error(stmt_obj->connection->conn, buffer, sizeof(buffer));
-        if (rc != 0 && rc != 100) { // 100 is "no more results"
+        if (rc != 0 && rc != 100) { 
             error_msg = buffer;
             WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: ERROR getting next result: %s", error_msg.c_str());
         } else {
@@ -446,17 +544,19 @@ void GetMoreResultsWorker::Execute() {
         }
     } else {
         WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: More results found.");
+        fetchResultSet(stmt_obj->sqlany_stmt, fetch_result); // <--- FETCH BACKGROUND
     }
     uv_mutex_unlock(&stmt_obj->connection->conn_mutex);
     WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Mutex unlocked. Exiting.");
 }
+
 void GetMoreResultsWorker::OnOK() {
     WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "GetMoreResultsWorker: OnOK: Entry. has_more: %s, error: '%s'", has_more_results ? "true" : "false", error_msg.c_str());
     Napi::HandleScope scope(Env());
     if (!error_msg.empty()) {
         Callback().Call({Napi::Error::New(Env(), error_msg).Value()});
     } else if (has_more_results) {
-        result = buildResult(Env(), stmt_obj->sqlany_stmt);
+        result = buildJSResult(Env(), fetch_result); // <--- BUILD JAVASCRIPT OBJECTS
         Callback().Call({Env().Null(), result});
     } else {
         Callback().Call({Env().Null(), Env().Undefined()});

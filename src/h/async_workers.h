@@ -7,8 +7,33 @@
 #include <vector>
 #include <string>
 
-// --- Standalone Helper Function Declaration ---
-Napi::Value buildResult(Napi::Env env, a_sqlany_stmt* stmt);
+// --- Native C++ Fetch Structures ---
+struct FetchColumn {
+    std::string name;
+    a_sqlany_data_type type;
+    bool is_null;
+    std::string string_val;
+    double double_val;
+    float float_val;
+    long long val64;
+    unsigned long long uval64;
+    int val32;
+    unsigned int uval32;
+    short val16;
+    unsigned short uval16;
+    signed char val8;
+    unsigned char uval8;
+};
+
+struct FetchResult {
+    int affected_rows = 0;
+    int num_cols = 0;
+    std::vector<std::vector<FetchColumn>> rows;
+};
+
+// --- Standalone Helpers ---
+void fetchResultSet(a_sqlany_stmt* stmt, FetchResult& out_result);
+Napi::Value buildJSResult(Napi::Env env, const FetchResult& fetch_result);
 
 // --- Worker Classes ---
 class ConnectWorker;
@@ -25,7 +50,6 @@ public:
     void Execute();
     void OnOK();
 private:
-    // prepareBindParams is now a free function, so it's removed from here.
     Connection* conn_obj;
     std::string sql;
     Napi::Value result;
@@ -33,6 +57,7 @@ private:
     a_sqlany_stmt* stmt_handle = nullptr;
     std::vector<a_sqlany_bind_param> bind_params;
     ExecuteData param_data;
+    FetchResult fetch_result;
 };
 
 class ExecStmtWorker : public Napi::AsyncWorker {
@@ -41,12 +66,12 @@ public:
     void Execute();
     void OnOK();
 private:
-    // prepareBindParams is now a free function, so it's removed from here.
     StmtObject* stmt_obj;
     Napi::Value result;
     std::string error_msg;
     std::vector<a_sqlany_bind_param> bind_params;
     ExecuteData param_data;
+    FetchResult fetch_result;
 };
 
 class ConnectWorker : public Napi::AsyncWorker {
@@ -103,4 +128,5 @@ private:
     Napi::Value result;
     std::string error_msg;
     bool has_more_results = false;
+    FetchResult fetch_result;
 };
