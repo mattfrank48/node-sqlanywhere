@@ -7,10 +7,13 @@
 #include <vector>
 #include <string>
 
-// --- Native C++ Fetch Structures ---
-struct FetchColumn {
+// --- Optimized Native C++ Fetch Structures ---
+struct ColumnMeta {
     std::string name;
     a_sqlany_data_type type;
+};
+
+struct FetchValue {
     bool is_null;
     std::string string_val;
     double double_val;
@@ -28,7 +31,8 @@ struct FetchColumn {
 struct FetchResult {
     int affected_rows = 0;
     int num_cols = 0;
-    std::vector<std::vector<FetchColumn>> rows;
+    std::vector<ColumnMeta> meta;             // Stored ONCE per query
+    std::vector<std::vector<FetchValue>> rows; // Contains only values
 };
 
 // --- Standalone Helpers ---

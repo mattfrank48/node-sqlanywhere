@@ -6,7 +6,6 @@
 void prepareBindParams(Napi::Array params, std::vector<a_sqlany_bind_param>& bind_params, ExecuteData& param_data);
 
 // --- RUNS ON BACKGROUND C++ THREAD ---
-// Syncs across the network and caches the data locally
 void fetchResultSet(a_sqlany_stmt* stmt, FetchResult& out_result) {
     out_result.num_cols = api.sqlany_num_cols(stmt);
     if (out_result.num_cols <= 0) {
@@ -14,21 +13,22 @@ void fetchResultSet(a_sqlany_stmt* stmt, FetchResult& out_result) {
         return;
     }
 
-    // Pre-fetch column names to avoid fetching them inside the loop
-    std::vector<a_sqlany_column_info> col_infos(out_result.num_cols);
+    // MEMORY OPTIMIZATION: Store Metadata exactly once.
+    out_result.meta.resize(out_result.num_cols);
     for (int i = 0; i < out_result.num_cols; i++) {
-        api.sqlany_get_column_info(stmt, i, &col_infos[i]);
+        a_sqlany_column_info info;
+        api.sqlany_get_column_info(stmt, i, &info);
+        out_result.meta[i].name = info.name;
+        out_result.meta[i].type = info.type; 
     }
 
     while (api.sqlany_fetch_next(stmt)) {
-        std::vector<FetchColumn> row(out_result.num_cols);
+        std::vector<FetchValue> row(out_result.num_cols);
         for (int i = 0; i < out_result.num_cols; i++) {
             a_sqlany_data_value val;
             api.sqlany_get_column(stmt, i, &val);
 
-            row[i].name = col_infos[i].name;
             row[i].is_null = *(val.is_null);
-            row[i].type = val.type;
 
             if (!row[i].is_null) {
                 switch(val.type) {
@@ -55,7 +55,6 @@ void fetchResultSet(a_sqlany_stmt* stmt, FetchResult& out_result) {
 }
 
 // --- RUNS ON NODE.JS MAIN THREAD ---
-// Instantly maps local C++ memory to V8 JavaScript objects
 Napi::Value buildJSResult(Napi::Env env, const FetchResult& fetch_result) {
     if (fetch_result.num_cols <= 0) {
         return Napi::Number::New(env, fetch_result.affected_rows);
@@ -67,28 +66,30 @@ Napi::Value buildJSResult(Napi::Env env, const FetchResult& fetch_result) {
         const auto& f_row = fetch_result.rows[r];
 
         for (uint32_t c = 0; c < f_row.size(); c++) {
-            const FetchColumn& col = f_row[c];
-            if (col.is_null) {
-                row.Set(col.name, env.Null());
+            const FetchValue& val = f_row[c];
+            const ColumnMeta& meta = fetch_result.meta[c]; // Grab metadata
+
+            if (val.is_null) {
+                row.Set(meta.name, env.Null());
             } else {
-                switch(col.type) {
+                switch(meta.type) { // Map using standard metadata type
                     case A_BINARY:
-                        row.Set(col.name, Napi::Buffer<char>::Copy(env, col.string_val.data(), col.string_val.size()));
+                        row.Set(meta.name, Napi::Buffer<char>::Copy(env, val.string_val.data(), val.string_val.size()));
                         break;
                     case A_STRING:
-                        row.Set(col.name, Napi::String::New(env, col.string_val.data(), col.string_val.size()));
+                        row.Set(meta.name, Napi::String::New(env, val.string_val.data(), val.string_val.size()));
                         break;
-                    case A_DOUBLE: row.Set(col.name, Napi::Number::New(env, col.double_val)); break;
-                    case A_FLOAT: row.Set(col.name, Napi::Number::New(env, col.float_val)); break;
-                    case A_VAL64: row.Set(col.name, Napi::Number::New(env, (double)col.val64)); break;
-                    case A_UVAL64: row.Set(col.name, Napi::Number::New(env, (double)col.uval64)); break;
-                    case A_VAL32: row.Set(col.name, Napi::Number::New(env, col.val32)); break;
-                    case A_UVAL32: row.Set(col.name, Napi::Number::New(env, col.uval32)); break;
-                    case A_VAL16: row.Set(col.name, Napi::Number::New(env, col.val16)); break;
-                    case A_UVAL16: row.Set(col.name, Napi::Number::New(env, col.uval16)); break;
-                    case A_VAL8: row.Set(col.name, Napi::Number::New(env, col.val8)); break;
-                    case A_UVAL8: row.Set(col.name, Napi::Number::New(env, col.uval8)); break;
-                    default: row.Set(col.name, Napi::String::New(env, col.string_val)); break;
+                    case A_DOUBLE: row.Set(meta.name, Napi::Number::New(env, val.double_val)); break;
+                    case A_FLOAT: row.Set(meta.name, Napi::Number::New(env, val.float_val)); break;
+                    case A_VAL64: row.Set(meta.name, Napi::Number::New(env, (double)val.val64)); break;
+                    case A_UVAL64: row.Set(meta.name, Napi::Number::New(env, (double)val.uval64)); break;
+                    case A_VAL32: row.Set(meta.name, Napi::Number::New(env, val.val32)); break;
+                    case A_UVAL32: row.Set(meta.name, Napi::Number::New(env, val.uval32)); break;
+                    case A_VAL16: row.Set(meta.name, Napi::Number::New(env, val.val16)); break;
+                    case A_UVAL16: row.Set(meta.name, Napi::Number::New(env, val.uval16)); break;
+                    case A_VAL8: row.Set(meta.name, Napi::Number::New(env, val.val8)); break;
+                    case A_UVAL8: row.Set(meta.name, Napi::Number::New(env, val.uval8)); break;
+                    default: row.Set(meta.name, Napi::String::New(env, val.string_val)); break;
                 }
             }
         }
@@ -300,37 +301,47 @@ ExecStmtWorker::ExecStmtWorker(StmtObject* s, const Napi::Function& cb, Napi::Ar
     prepareBindParams(p, bind_params, param_data);
 }
 void ExecStmtWorker::Execute() {
-    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "ExecStmtWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
+    WORKER_LOG(NULL, "ExecStmtWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
     
     if (stmt_obj == nullptr) {
         error_msg = "Statement is not valid (it may have been dropped).";
-        WORKER_LOG(NULL, "ExecStmtWorker: Execute: ERROR - %s", error_msg.c_str());
         return; 
     }
-    uv_mutex_lock(&stmt_obj->connection->conn_mutex);
-    WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Mutex locked. conn: %p", stmt_obj->connection);
+
+    // THREAD SAFETY: Capture the connection pointer BEFORE locking
+    Connection* safe_conn = stmt_obj->connection;
+    if (safe_conn == nullptr) {
+        error_msg = "Statement connection is null (dropped).";
+        return;
+    }
+
+    uv_mutex_lock(&safe_conn->conn_mutex);
+    WORKER_LOG(safe_conn, "ExecStmtWorker: Execute: Mutex locked.");
     
-    if (stmt_obj->connection == nullptr || stmt_obj->sqlany_stmt == nullptr) {
-        error_msg = "Statement is not valid (it may have been dropped).";
-        WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR - %s", error_msg.c_str());
-        uv_mutex_unlock(&stmt_obj->connection->conn_mutex);
+    // THREAD SAFETY: Re-check that the statement wasn't dropped while we waited for the lock
+    if (stmt_obj->connection != safe_conn || stmt_obj->sqlany_stmt == nullptr) {
+        error_msg = "Statement was dropped while waiting for lock.";
+        uv_mutex_unlock(&safe_conn->conn_mutex);
         return; 
     }
+
     for (size_t i = 0; i < bind_params.size(); i++) {
         if (!api.sqlany_bind_param(stmt_obj->sqlany_stmt, i, &bind_params[i])) {
-            getErrorMsg(stmt_obj->connection->conn, error_msg);
-            WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR binding param %zu: %s", i, error_msg.c_str());
+            getErrorMsg(safe_conn->conn, error_msg);
+            WORKER_LOG(safe_conn, "ExecStmtWorker: Execute: ERROR binding param %zu: %s", i, error_msg.c_str());
             break;
         }
     }
+
     if(error_msg.empty() && !api.sqlany_execute(stmt_obj->sqlany_stmt)) {
-        getErrorMsg(stmt_obj->connection->conn, error_msg);
-        WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: ERROR executing: %s", error_msg.c_str());
+        getErrorMsg(safe_conn->conn, error_msg);
+        WORKER_LOG(safe_conn, "ExecStmtWorker: Execute: ERROR executing: %s", error_msg.c_str());
     } else if (error_msg.empty()) {
-        fetchResultSet(stmt_obj->sqlany_stmt, fetch_result); // <--- FETCH BACKGROUND
+        fetchResultSet(stmt_obj->sqlany_stmt, fetch_result);
     }
-    uv_mutex_unlock(&stmt_obj->connection->conn_mutex);
-    WORKER_LOG(stmt_obj->connection, "ExecStmtWorker: Execute: Mutex unlocked. Exiting.");
+
+    uv_mutex_unlock(&safe_conn->conn_mutex);
+    WORKER_LOG(safe_conn, "ExecStmtWorker: Execute: Mutex unlocked. Exiting.");
 }
 
 void ExecStmtWorker::OnOK() {
@@ -515,39 +526,46 @@ GetMoreResultsWorker::GetMoreResultsWorker(StmtObject* s, const Napi::Function& 
     WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "GetMoreResultsWorker: CREATED for stmt %p", (void*)stmt_obj);
 }
 void GetMoreResultsWorker::Execute() {
-    WORKER_LOG(stmt_obj ? stmt_obj->connection : NULL, "GetMoreResultsWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
+    WORKER_LOG(NULL, "GetMoreResultsWorker: Execute: Entry for stmt %p", (void*)stmt_obj);
     if (stmt_obj == nullptr) {
         error_msg = "Statement is not valid (it may have been dropped).";
-        WORKER_LOG(NULL, "GetMoreResultsWorker: Execute: ERROR - %s", error_msg.c_str());
         return; 
     }
-    uv_mutex_lock(&stmt_obj->connection->conn_mutex);
-    WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Mutex locked.");
-    if (stmt_obj->connection == nullptr || stmt_obj->sqlany_stmt == nullptr) {
-        error_msg = "Statement is not valid (it may have been dropped).";
-        WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: ERROR - %s", error_msg.c_str());
-        uv_mutex_unlock(&stmt_obj->connection->conn_mutex);
+
+    // THREAD SAFETY: Capture the connection pointer BEFORE locking
+    Connection* safe_conn = stmt_obj->connection;
+    if (safe_conn == nullptr) {
+        error_msg = "Statement connection is null (dropped).";
+        return;
+    }
+
+    uv_mutex_lock(&safe_conn->conn_mutex);
+    WORKER_LOG(safe_conn, "GetMoreResultsWorker: Execute: Mutex locked.");
+    
+    // THREAD SAFETY: Re-check that the statement wasn't dropped while we waited for the lock
+    if (stmt_obj->connection != safe_conn || stmt_obj->sqlany_stmt == nullptr) {
+        error_msg = "Statement was dropped while waiting for lock.";
+        uv_mutex_unlock(&safe_conn->conn_mutex);
         return;
     }
     
-    WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Calling sqlany_get_next_result.");
+    WORKER_LOG(safe_conn, "GetMoreResultsWorker: Execute: Calling sqlany_get_next_result.");
     has_more_results = api.sqlany_get_next_result(stmt_obj->sqlany_stmt);
     
     if (!has_more_results) {
         char buffer[SACAPI_ERROR_SIZE];
-        int rc = api.sqlany_error(stmt_obj->connection->conn, buffer, sizeof(buffer));
+        int rc = api.sqlany_error(safe_conn->conn, buffer, sizeof(buffer));
         if (rc != 0 && rc != 100) { 
             error_msg = buffer;
-            WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: ERROR getting next result: %s", error_msg.c_str());
-        } else {
-            WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: No more results (rc: %d).", rc);
+            WORKER_LOG(safe_conn, "GetMoreResultsWorker: Execute: ERROR getting next result: %s", error_msg.c_str());
         }
     } else {
-        WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: More results found.");
-        fetchResultSet(stmt_obj->sqlany_stmt, fetch_result); // <--- FETCH BACKGROUND
+        WORKER_LOG(safe_conn, "GetMoreResultsWorker: Execute: More results found.");
+        fetchResultSet(stmt_obj->sqlany_stmt, fetch_result);
     }
-    uv_mutex_unlock(&stmt_obj->connection->conn_mutex);
-    WORKER_LOG(stmt_obj->connection, "GetMoreResultsWorker: Execute: Mutex unlocked. Exiting.");
+
+    uv_mutex_unlock(&safe_conn->conn_mutex);
+    WORKER_LOG(safe_conn, "GetMoreResultsWorker: Execute: Mutex unlocked. Exiting.");
 }
 
 void GetMoreResultsWorker::OnOK() {
