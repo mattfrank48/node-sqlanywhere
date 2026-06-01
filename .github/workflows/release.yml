@@ -10,7 +10,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
+        os: [ubuntu-22.04, windows-latest, macos-latest, macos-26-intel]
 
     steps:
       - uses: actions/checkout@v4
@@ -34,15 +34,21 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         run: sudo apt-get install -y build-essential
 
-      # Setup for macOS build
-      - name: Install build tools (macOS)
+      # Setup for macOS (arm) build
+      - name: Install build tools (macOS arm)
         if: matrix.os == 'macos-latest'
+        run: |
+          xcode-select --install || echo "Xcode Command Line Tools already installed"
+
+      # Setup for macOS (x64) build
+      - name: Install build tools (macOS x64)
+        if: matrix.os == 'macos-26-intel'
         run: |
           xcode-select --install || echo "Xcode Command Line Tools already installed"
 
       # Force a clean build to prevent caching issues
       - name: Clean Old Build Artifacts (Linux & macOS)
-        if: matrix.os == 'ubuntu-22.04' || matrix.os == 'macos-latest'
+        if: matrix.os == 'ubuntu-22.04' || matrix.os == 'macos-latest' || matrix.os == 'macos-26-intel'
         run: rm -rf build prebuilds
 
       - name: Clean Old Build Artifacts (Windows)
