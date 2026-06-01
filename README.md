@@ -29,6 +29,37 @@ npm install @iqx-limited/sqlanywhere
 
 The installation process will attempt to use pre-built binaries, if that fails, it will automatically compile the native C++ addon for your platform.
 
+## Apple Silicon (MacOS ARM) bridge mode
+
+If `dbcapi` is only available as `x86_64`, you can keep your main Node.js app running natively on ARM and run only the SQL Anywhere driver work in a Rosetta-backed helper process.
+
+Enable bridge mode:
+
+```sh
+SQLANYWHERE_BRIDGE=1 node app.js
+```
+
+On MacOS ARM, bridge mode automatically starts the helper as:
+
+```sh
+arch -x86_64 <current-node-exec> <package>/bridge/server.js
+```
+
+Optional overrides:
+
+* `SQLANYWHERE_BRIDGE_EXECUTABLE`: custom bridge executable (for example, a specific `arch` path or a wrapper script).
+* `SQLANYWHERE_BRIDGE_ARGS`: JSON array of arguments for the executable.
+* `SQLANYWHERE_BRIDGE_SERVER`: custom bridge server script path.
+
+Example with explicit executable + args:
+
+```sh
+SQLANYWHERE_BRIDGE=1 \
+SQLANYWHERE_BRIDGE_EXECUTABLE=arch \
+SQLANYWHERE_BRIDGE_ARGS='["-x86_64","/usr/local/bin/node","/absolute/path/to/node_modules/@iqx-limited/sqlanywhere/bridge/server.js"]' \
+node app.js
+```
+
 ## Getting Started
 
 > [!TIP]
